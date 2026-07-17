@@ -2,99 +2,159 @@ import pytest
 from fastapi.testclient import TestClient
 from main import app, tasks  # Импортируем приложение и список задач
 
-client = TestClient(app)
 
-# Фикстура для сброса состояния списка перед каждым тестом
+# ==========================================
+#              1. ФИКСТУРЫ
+# ==========================================
+
+@pytest.fixture
+def api_client():
+    """Создает изолированный веб-клиент для отправки HTTP-запросов."""
+    return TestClient(app)
+
+
 @pytest.fixture(autouse=True)
 def reset_tasks():
-    # Сохраняем начальное состояние
-    original_tasks = tasks.copy()
-    yield
-    # Возвращаем список в исходное состояние после теста
+    """Перед каждым тестом полностью очищает список задач, гарантируя изоляцию."""
     tasks.clear()
-    tasks.extend(original_tasks)
+    yield
+    tasks.clear()
 
-def test_read_tasks():
-    response = client.get("/tasks")
+
+@pytest.fixture
+def valid_task_payload():
+    """Возвращает корректные данные для создания новой задачи."""
+    return {"id": 3, "title": "Новая задача", "completed": False}
+
+
+@pytest.fixture
+def duplicate_task_payload():
+    """Возвращает данные задачи с ID=1 для проверки дубликатов."""
+    return {"id": 1, "title": "Дубликат", "completed": False}
+
+
+# ==========================================
+#               2. ТЕСТЫ
+# ==========================================
+
+def test_read_tasks(api_client):
+    """Проверяет получение списка всех задач."""
+    # Сами наполняем базу перед проверкой
+    api_client.post("/tasks", json={"id": 1, "title": "Задача 1", "completed": False})
+    api_client.post("/tasks", json={"id": 2, "title": "Задача 2", "completed": True})
+
+    response = api_client.get("/tasks")
     assert response.status_code == 200
     assert len(response.json()) == 2
 
-def test_add_task():
-    payload = {"id": 3, "title": "Новая задача", "completed": False}
-    response = client.post("/tasks", json=payload)
+
+def test_add_task(api_client, valid_task_payload):
+    """Проверяет успешное создание новой задачи."""
+    response = api_client.post("/tasks", json=valid_task_payload)
     assert response.status_code == 200
-    assert response.json()["title"] == "Новая задача"
-    
-    # Проверяем, что задача реально добавилась
-    get_response = client.get("/tasks/3")
+    assert response.json()["title"] == valid_task_payload["title"]
+
+    # Проверяем, что задача реально доступна по её ID
+    get_response = api_client.get(f"/tasks/{valid_task_payload['id']}")
     assert get_response.status_code == 200
 
-def test_delete_task():
-    # Удаляем задачу с id=1
-    response = client.delete("/tasks/1")
+
+def test_delete_task(api_client):
+    """Проверяет удаление существующей задачи."""
+    # Создаем задачу, которую будем удалять
+    api_client.post("/tasks", json={"id": 1, "title": "Удаляемая задача", "completed": False})
+
+    response = api_client.delete("/tasks/1")
     assert response.status_code == 200
-    
-    # Проверяем, что её больше нет
-    get_response = client.get("/tasks/1")
+
+    # Проверяем побочный эффект: задачи больше не должно быть
+    get_response = api_client.get("/tasks/1")
     assert get_response.status_code == 404
 
-def test_update_task():
+
+def test_update_task(api_client):
+    """Проверяет обновление данных задачи."""
+    # Создаем задачу для обновления
+    api_client.post("/tasks", json={"id": 1, "title": "Старая задача", "completed": False})
+
     payload = {"id": 1, "title": "Измененная задача", "completed": True}
-    response = client.put("/tasks/1", json=payload)
+    response = api_client.put("/tasks/1", json=payload)
     assert response.status_code == 200
     assert response.json()["title"] == "Измененная задача"
     assert response.json()["completed"] is True
 
-def test_search_tasks():
-    response = client.get("/tasks/search/?query=верстку")
+
+def test_search_tasks(api_client):
+    """Проверяет успешный поиск по ключевому слову."""
+    api_client.post("/tasks", json={"id": 1, "title": "Сделать верстку", "completed": False})
+
+    response = api_client.get("/tasks/search/?query=верстку")
     assert response.status_code == 200
     assert len(response.json()) == 1
     assert response.json()[0]["title"] == "Сделать верстку"
 
-def test_get_stats():
-    response = client.get("/tasks/stats/")
+
+def test_get_stats(api_client):
+    """Проверяет расчет агрегированной статистики по задачам."""
+    api_client.post("/tasks", json={"id": 1, "title": "Задача 1", "completed": True})
+    api_client.post("/tasks", json={"id": 2, "title": "Задача 2", "completed": False})
+
+    response = api_client.get("/tasks/stats/")
     assert response.status_code == 200
     data = response.json()
     assert data["total_tasks"] == 2
     assert data["completed_tasks"] == 1
     assert data["percentage"] == 50.0
-def test_add_duplicate_task():
-    # 1. Добавляем задачу
-    payload = {"id": 10, "title": "Уникальная задача", "completed": False}
-    client.post("/tasks", json=payload)
-    
-    # 2. Пытаемся добавить задачу с ТАКИМ ЖЕ ID
-    duplicate_payload = {"id": 10, "title": "Дубликат", "completed": False}
-    response = client.post("/tasks", json=duplicate_payload)
-    
-    # 3. Проверяем, что сервер вернул ошибку 400
+
+
+def test_add_duplicate_task(api_client, duplicate_task_payload):
+    """Проверяет ошибку при создании задачи с уже занятым ID."""
+    # Создаем оригинальную задачу с ID=1
+    api_client.post("/tasks", json={"id": 1, "title": "Оригинал", "completed": False})
+
+    # Пробуем отправить дубликат с ID=1
+    response = api_client.post("/tasks", json=duplicate_task_payload)
     assert response.status_code == 400
     assert response.json()["detail"] == "Задача с таким ID уже существует"
-def test_search_tasks_not_found():
-    # 1. Делаем запрос к "/tasks/search/" с параметром query, 
-    # которого точно нет в ваших задачах (например, "инопланетяне")
-    response = client.get("/tasks/search/?query=инопланетяне") 
-    
-    # 2. Проверяем, что ответ успешный (статус 200)
+
+
+def test_search_tasks_not_found(api_client):
+    """Проверяет, что при отсутствии совпадений в поиске возвращается пустой список."""
+    response = api_client.get("/tasks/search/?query=инопланетяне")
     assert response.status_code == 200
-    
-    # 3. Проверяем, что вернулся именно пустой список
     assert response.json() == []
-def test_delete_completed_tasks():
-    # 1. Отправляем запрос на удаление
-    response = client.delete("/tasks/completed/")
+
+
+def test_delete_completed_tasks(api_client):
+    """Проверяет групповое удаление всех выполненных задач."""
+    api_client.post("/tasks", json={"id": 1, "title": "Задача 1", "completed": True})
+    api_client.post("/tasks", json={"id": 2, "title": "Задача 2", "completed": False})
+
+    response = api_client.delete("/tasks/completed/")
     assert response.status_code == 200
-    
-    # 2. Проверяем, что в списке не осталось выполненных задач
-    remaining_tasks = client.get("/tasks").json()
+
+    # Проверяем, что выполненная задача удалилась, а невыполненная осталась
+    remaining_tasks = api_client.get("/tasks").json()
     for task in remaining_tasks:
         assert task["completed"] is False
-def test_add_task_invalid_data():
-    # Отправляем задачу без обязательного поля title
-    response = client.post("/tasks", json={"id": 4}) 
-    assert response.status_code == 422  # Код ошибки валидации FastAPI
 
-def test_delete_nonexistent_task():
-    # Пытаемся удалить задачу, которой нет
-    response = client.delete("/tasks/99999")
+
+def test_add_task_invalid_data(api_client):
+    """Проверяет валидацию FastAPI при отправке некорректных данных (без title)."""
+    response = api_client.post("/tasks", json={"id": 4})
+    assert response.status_code == 422
+
+
+def test_delete_nonexistent_task(api_client):
+    """Проверяет ошибку при удалении задачи, которой нет в списке."""
+    response = api_client.delete("/tasks/99999")
     assert response.status_code == 404
+
+
+def test_update_nonexistent_task(api_client):
+    """Проверяет ошибку при попытке обновить отсутствующую задачу."""
+    payload = {"id": 999, "title": "Несуществующая", "completed": True}
+    response = api_client.put("/tasks/999", json=payload)
+    assert response.status_code == 404
+    assert response.json()["detail"] == "Задача не найдена"
+
